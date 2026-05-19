@@ -19,6 +19,16 @@ from quantify.models.artifacts import load_preprocessor, save_preprocessor
 def load_raw_frames(config: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     store = LocalStore(config.paths.data_dir)
     stock_daily = store.required("stocks/daily.csv", parse_dates=["date"])
+    stock_info = store.read_csv("stocks/info.csv")
+    if not stock_info.empty:
+        merge_cols = [c for c in ["code", "name", "sector", "market_cap", "list_date"] if c in stock_info.columns]
+        stock_daily = stock_daily.merge(stock_info[merge_cols].drop_duplicates("code"), on="code", how="left")
+    sector_map = store.read_csv("stocks/sector_map.csv")
+    if "sector" not in stock_daily.columns and not sector_map.empty:
+        stock_daily = stock_daily.merge(sector_map[["code", "sector"]].drop_duplicates("code"), on="code", how="left")
+    stock_list = store.read_csv("stocks/list.csv")
+    if "name" not in stock_daily.columns and not stock_list.empty:
+        stock_daily = stock_daily.merge(stock_list[["code", "name"]].drop_duplicates("code"), on="code", how="left")
     index_daily = store.read_csv("market/index_daily.csv", parse_dates=["date"])
     sector_daily = store.read_csv("market/sector_daily.csv", parse_dates=["date"])
     fundamentals = store.read_csv("fundamentals/features.csv", parse_dates=["date"])

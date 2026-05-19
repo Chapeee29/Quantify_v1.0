@@ -12,6 +12,9 @@ dist/
 /models/
 /reports/
 /logs/
+/data_real/
+/models_real/
+/reports_real/
 
 # Local-only config may contain machine-specific paths.
 configs/config.local.yaml

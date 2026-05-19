@@ -26,7 +26,14 @@ def load_model(model_path: str | Path, config: AppConfig, sequence_dim: int, sta
     return model
 
 
-def score_candidates(arrays: SequenceArrays, model_path: str | Path, config: AppConfig, as_of_date: str | None = None) -> pd.DataFrame:
+def score_candidates(
+    arrays: SequenceArrays,
+    model_path: str | Path,
+    config: AppConfig,
+    as_of_date: str | None = None,
+    include_st: bool = False,
+    include_stale: bool = False,
+) -> pd.DataFrame:
     if arrays.x_sequence.size == 0:
         return pd.DataFrame()
     model = load_model(model_path, config, arrays.x_sequence.shape[-1], arrays.x_static.shape[-1])
@@ -44,6 +51,11 @@ def score_candidates(arrays: SequenceArrays, model_path: str | Path, config: App
         scores = torch.sigmoid(model(seq, sta)).cpu().numpy()
     result = arrays.meta.iloc[latest_idx].copy()
     result["score"] = scores
+    if not include_st and "name" in result.columns:
+        result = result[~result["name"].astype(str).str.contains("ST", case=False, na=False)]
+    if not include_stale and not result.empty:
+        latest_date = pd.to_datetime(result["date"]).max()
+        result = result[pd.to_datetime(result["date"]) == latest_date]
     result = result.sort_values("score", ascending=False).reset_index(drop=True)
     return result
 

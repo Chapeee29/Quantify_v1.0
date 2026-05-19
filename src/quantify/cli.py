@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +20,18 @@ def _config(args: argparse.Namespace):
     return load_config(args.config)
 
 
+def _disable_proxy_env() -> None:
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(key, None)
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+
+
+def _prepare_network(args: argparse.Namespace) -> None:
+    if not getattr(args, "use_proxy", False):
+        _disable_proxy_env()
+
+
 def cmd_make_sample_data(args: argparse.Namespace) -> None:
     config = _config(args)
     make_sample_data(config.paths.data_dir)
@@ -25,6 +39,7 @@ def cmd_make_sample_data(args: argparse.Namespace) -> None:
 
 
 def cmd_fetch_stock_list(args: argparse.Namespace) -> None:
+    _prepare_network(args)
     config = _config(args)
     source = AkShareSource()
     frame = source.stock_list()
@@ -33,6 +48,7 @@ def cmd_fetch_stock_list(args: argparse.Namespace) -> None:
 
 
 def cmd_fetch_daily(args: argparse.Namespace) -> None:
+    _prepare_network(args)
     config = _config(args)
     source = AkShareSource()
     store = LocalStore(config.paths.data_dir)
@@ -43,14 +59,25 @@ def cmd_fetch_daily(args: argparse.Namespace) -> None:
     if args.limit:
         codes = codes[: args.limit]
     frames = []
-    for code in codes:
+    failures = []
+
+    def fetch_one(code: str):
         try:
-            frame = source.stock_daily(code, config.data.start_date, config.data.end_date)
+            return code, source.stock_daily(code, config.data.start_date, config.data.end_date), None
         except Exception as exc:
-            print(f"skip {code}: {exc}")
-            continue
-        if not frame.empty:
-            frames.append(frame)
+            return code, pd.DataFrame(), exc
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        future_map = {executor.submit(fetch_one, code): code for code in codes}
+        for idx, future in enumerate(as_completed(future_map), start=1):
+            code, frame, exc = future.result()
+            if exc is not None:
+                failures.append((code, str(exc)))
+                print(f"skip {code}: {exc}")
+            elif not frame.empty:
+                frames.append(frame)
+            if idx % 50 == 0 or idx == len(codes):
+                print(f"fetched daily {idx}/{len(codes)}, ok={len(frames)}, failed={len(failures)}")
     if not frames:
         raise RuntimeError("No stock daily data fetched.")
     result = pd.concat(frames, ignore_index=True)
@@ -59,19 +86,116 @@ def cmd_fetch_daily(args: argparse.Namespace) -> None:
 
 
 def cmd_fetch_index(args: argparse.Namespace) -> None:
+    _prepare_network(args)
     config = _config(args)
     source = AkShareSource()
     frames = []
-    for symbol in config.data.index_symbols:
+
+    def fetch_one(symbol: str):
         try:
-            frames.append(source.index_daily(symbol, config.data.start_date, config.data.end_date))
+            return symbol, source.index_daily(symbol, config.data.start_date, config.data.end_date), None
         except Exception as exc:
-            print(f"skip {symbol}: {exc}")
+            return symbol, pd.DataFrame(), exc
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        future_map = {executor.submit(fetch_one, symbol): symbol for symbol in config.data.index_symbols}
+        for future in as_completed(future_map):
+            symbol, frame, exc = future.result()
+            if exc is not None:
+                print(f"skip {symbol}: {exc}")
+            elif not frame.empty:
+                frames.append(frame)
     if not frames:
         raise RuntimeError("No index data fetched.")
     result = pd.concat(frames, ignore_index=True)
     LocalStore(config.paths.data_dir).write_csv("market/index_daily.csv", result)
     print(f"index rows: {len(result)}")
+
+
+def cmd_fetch_sector(args: argparse.Namespace) -> None:
+    _prepare_network(args)
+    config = _config(args)
+    source = AkShareSource()
+    store = LocalStore(config.paths.data_dir)
+    sectors = source.industry_list()
+    if args.limit:
+        sectors = sectors.head(args.limit)
+    sector_names = sectors["sector"].astype(str).tolist()
+    daily_frames = []
+    mapping_frames = []
+    failures = []
+
+    def fetch_one(sector: str):
+        try:
+            daily = source.industry_daily(sector, config.data.start_date, config.data.end_date)
+            mapping = source.industry_constituents(sector)
+            return sector, daily, mapping, None
+        except Exception as exc:
+            return sector, pd.DataFrame(), pd.DataFrame(), exc
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        future_map = {executor.submit(fetch_one, sector): sector for sector in sector_names}
+        for idx, future in enumerate(as_completed(future_map), start=1):
+            sector, daily, mapping, exc = future.result()
+            if exc is not None:
+                failures.append((sector, str(exc)))
+                print(f"skip sector {sector}: {exc}")
+            else:
+                if not daily.empty:
+                    daily_frames.append(daily)
+                if not mapping.empty:
+                    mapping_frames.append(mapping)
+            if idx % 10 == 0 or idx == len(sector_names):
+                print(f"fetched sectors {idx}/{len(sector_names)}, ok={len(daily_frames)}, failed={len(failures)}")
+
+    if not daily_frames:
+        raise RuntimeError("No sector daily data fetched.")
+    sector_daily = pd.concat(daily_frames, ignore_index=True)
+    store.write_csv("market/sector_daily.csv", sector_daily)
+    if mapping_frames:
+        sector_map = pd.concat(mapping_frames, ignore_index=True).drop_duplicates(subset=["code"])
+        store.write_csv("stocks/sector_map.csv", sector_map)
+        print(f"sector map rows: {len(sector_map)}")
+    print(f"sector daily rows: {len(sector_daily)}, sectors: {sector_daily['sector'].nunique()}")
+
+
+def cmd_fetch_stock_info(args: argparse.Namespace) -> None:
+    _prepare_network(args)
+    config = _config(args)
+    source = AkShareSource()
+    store = LocalStore(config.paths.data_dir)
+    stock_list = store.read_csv("stocks/list.csv")
+    if stock_list.empty:
+        stock_list = source.stock_list()
+    codes = stock_list["code"].astype(str).str.zfill(6).tolist()
+    if args.limit:
+        codes = codes[: args.limit]
+    frames = []
+    failures = []
+
+    def fetch_one(code: str):
+        try:
+            return code, source.stock_individual_info(code), None
+        except Exception as exc:
+            return code, pd.DataFrame(), exc
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        future_map = {executor.submit(fetch_one, code): code for code in codes}
+        for idx, future in enumerate(as_completed(future_map), start=1):
+            code, frame, exc = future.result()
+            if exc is not None:
+                failures.append((code, str(exc)))
+                print(f"skip info {code}: {exc}")
+            elif not frame.empty:
+                frames.append(frame)
+            if idx % 50 == 0 or idx == len(codes):
+                print(f"fetched stock info {idx}/{len(codes)}, ok={len(frames)}, failed={len(failures)}")
+    if not frames:
+        raise RuntimeError("No stock info data fetched.")
+    result = pd.concat(frames, ignore_index=True)
+    store.write_csv("stocks/info.csv", result)
+    store.write_csv("stocks/sector_map.csv", result[["code", "name", "sector"]].dropna(subset=["sector"]))
+    print(f"stock info rows: {len(result)}, sectors: {result['sector'].nunique()}")
 
 
 def cmd_extract_my_stock(args: argparse.Namespace) -> None:
@@ -114,7 +238,14 @@ def cmd_predict(args: argparse.Namespace) -> None:
 
     config = _config(args)
     arrays = prepare_prediction_arrays(config)
-    candidates = score_candidates(arrays, Path(config.paths.model_dir) / "deep_sequence.pt", config, args.as_of_date)
+    candidates = score_candidates(
+        arrays,
+        Path(config.paths.model_dir) / "deep_sequence.pt",
+        config,
+        args.as_of_date,
+        include_st=args.include_st,
+        include_stale=args.include_stale,
+    )
     output = write_top_report(candidates, config.paths.report_dir, config.report.top_n)
     print(f"report written: {output}")
     if not candidates.empty:
@@ -130,14 +261,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_make_sample_data)
 
     p = sub.add_parser("fetch-stock-list")
+    p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_stock_list)
 
     p = sub.add_parser("fetch-daily")
     p.add_argument("--limit", type=int, default=0, help="Limit stocks for a smoke fetch")
+    p.add_argument("--workers", type=int, default=8, help="Concurrent fetch workers")
+    p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_daily)
 
+    p = sub.add_parser("fetch-stock-info")
+    p.add_argument("--limit", type=int, default=0, help="Limit stocks for a smoke fetch")
+    p.add_argument("--workers", type=int, default=8, help="Concurrent fetch workers")
+    p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
+    p.set_defaults(func=cmd_fetch_stock_info)
+
     p = sub.add_parser("fetch-index")
+    p.add_argument("--workers", type=int, default=4, help="Concurrent fetch workers")
+    p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_index)
+
+    p = sub.add_parser("fetch-sector")
+    p.add_argument("--limit", type=int, default=0, help="Limit sectors for a smoke fetch")
+    p.add_argument("--workers", type=int, default=6, help="Concurrent fetch workers")
+    p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
+    p.set_defaults(func=cmd_fetch_sector)
 
     p = sub.add_parser("extract-my-stock")
     p.add_argument("--list-std", action="store_true", help="Print sheets in the My_Stock std workbook")
@@ -148,6 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("predict")
     p.add_argument("--as-of-date")
+    p.add_argument("--include-st", action="store_true", help="Include ST and *ST stocks in the recommendation report")
+    p.add_argument("--include-stale", action="store_true", help="Include stocks whose latest local trading date is older than the max date")
     p.set_defaults(func=cmd_predict)
     return parser
 
