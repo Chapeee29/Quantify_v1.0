@@ -38,6 +38,7 @@ def make_sample_data(data_dir: str | Path, seed: int = 42) -> None:
                 {
                     "date": d,
                     "code": code,
+                    "name": f"样例{idx + 1}",
                     "open": o,
                     "high": h,
                     "low": l,

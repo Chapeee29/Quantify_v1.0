@@ -23,7 +23,10 @@ class LocalStore:
         path = self.path(name)
         if not path.exists():
             return pd.DataFrame()
-        return pd.read_csv(path, parse_dates=parse_dates)
+        frame = pd.read_csv(path, parse_dates=parse_dates, dtype={"code": "string"})
+        if "code" in frame.columns:
+            frame["code"] = frame["code"].astype(str).str.zfill(6)
+        return frame
 
     def write_csv(self, name: str, frame: pd.DataFrame) -> Path:
         path = self.path(name)
