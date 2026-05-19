@@ -26,7 +26,9 @@ class AkShareSource:
     def stock_list(self) -> pd.DataFrame:
         ak = self._ak()
         raw = ak.stock_info_a_code_name()
-        return raw.rename(columns={"code": "code", "name": "name"})[["code", "name"]]
+        frame = raw.rename(columns={"code": "code", "name": "name"})[["code", "name"]].copy()
+        frame["code"] = frame["code"].astype(str).str.zfill(6)
+        return frame
 
     def stock_daily(self, code: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
         try:

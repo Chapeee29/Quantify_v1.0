@@ -32,6 +32,30 @@ def _prepare_network(args: argparse.Namespace) -> None:
         _disable_proxy_env()
 
 
+def _parse_prefixes(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _select_codes(codes: list[str], args: argparse.Namespace) -> list[str]:
+    prefixes = _parse_prefixes(getattr(args, "prefixes", None))
+    if prefixes:
+        codes = [code for code in codes if any(code.startswith(prefix) for prefix in prefixes)]
+
+    per_prefix_limit = getattr(args, "per_prefix_limit", 0)
+    if prefixes and per_prefix_limit:
+        selected: list[str] = []
+        for prefix in prefixes:
+            selected.extend([code for code in codes if code.startswith(prefix)][:per_prefix_limit])
+        codes = selected
+
+    limit = getattr(args, "limit", 0)
+    if limit:
+        codes = codes[:limit]
+    return codes
+
+
 def cmd_make_sample_data(args: argparse.Namespace) -> None:
     config = _config(args)
     make_sample_data(config.paths.data_dir)
@@ -56,8 +80,10 @@ def cmd_fetch_daily(args: argparse.Namespace) -> None:
     if stock_list.empty:
         stock_list = source.stock_list()
     codes = stock_list["code"].astype(str).str.zfill(6).tolist()
-    if args.limit:
-        codes = codes[: args.limit]
+    codes = _select_codes(codes, args)
+    if not codes:
+        raise RuntimeError("No stock codes selected.")
+    print(f"selected daily codes: {len(codes)}, prefixes={','.join(_parse_prefixes(args.prefixes)) or 'all'}")
     frames = []
     failures = []
 
@@ -168,8 +194,10 @@ def cmd_fetch_stock_info(args: argparse.Namespace) -> None:
     if stock_list.empty:
         stock_list = source.stock_list()
     codes = stock_list["code"].astype(str).str.zfill(6).tolist()
-    if args.limit:
-        codes = codes[: args.limit]
+    codes = _select_codes(codes, args)
+    if not codes:
+        raise RuntimeError("No stock codes selected.")
+    print(f"selected stock info codes: {len(codes)}, prefixes={','.join(_parse_prefixes(args.prefixes)) or 'all'}")
     frames = []
     failures = []
 
@@ -266,12 +294,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("fetch-daily")
     p.add_argument("--limit", type=int, default=0, help="Limit stocks for a smoke fetch")
+    p.add_argument("--prefixes", default="00,60", help="Comma-separated stock code prefixes, default: 00,60")
+    p.add_argument("--per-prefix-limit", type=int, default=0, help="Fetch this many stocks for each requested prefix")
     p.add_argument("--workers", type=int, default=8, help="Concurrent fetch workers")
     p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_daily)
 
     p = sub.add_parser("fetch-stock-info")
     p.add_argument("--limit", type=int, default=0, help="Limit stocks for a smoke fetch")
+    p.add_argument("--prefixes", default="00,60", help="Comma-separated stock code prefixes, default: 00,60")
+    p.add_argument("--per-prefix-limit", type=int, default=0, help="Fetch this many stocks for each requested prefix")
     p.add_argument("--workers", type=int, default=8, help="Concurrent fetch workers")
     p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_stock_info)

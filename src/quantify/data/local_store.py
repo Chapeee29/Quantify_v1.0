@@ -31,6 +31,9 @@ class LocalStore:
     def write_csv(self, name: str, frame: pd.DataFrame) -> Path:
         path = self.path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
+        frame = frame.copy()
+        if "code" in frame.columns:
+            frame["code"] = frame["code"].astype(str).str.zfill(6)
         frame.to_csv(path, index=False, encoding="utf-8-sig")
         return path
 
