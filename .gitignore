@@ -8,10 +8,10 @@ dist/
 *.egg-info/
 
 # Local data and model artifacts stay on the remote training machine.
-data/
-models/
-reports/
-logs/
+/data/
+/models/
+/reports/
+/logs/
 
 # Local-only config may contain machine-specific paths.
 configs/config.local.yaml
