@@ -1,0 +1,23 @@
+paths:
+  data_dir: "data"
+  model_dir: "models"
+  report_dir: "reports"
+  my_stock_std_path: "D:/codex/My_Stock_v1.0/std.xlsx"
+  my_stock_final_dir: "D:/codex/My_Stock_v1.0/Stock_Final"
+
+features:
+  sequence_length: 30
+
+model:
+  epochs: 2
+  batch_size: 64
+  hidden_size: 32
+  device: "cpu"
+
+train:
+  train_end: "2024-07-31"
+  validation_end: "2024-10-31"
+  top_n: 5
+
+report:
+  top_n: 5

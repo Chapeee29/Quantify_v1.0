@@ -1,0 +1,45 @@
+paths:
+  data_dir: "D:/Quantify/data"
+  model_dir: "D:/Quantify/models"
+  report_dir: "D:/Quantify/reports"
+  my_stock_std_path: "D:/codex/My_Stock_v1.0/std.xlsx"
+  my_stock_final_dir: "D:/codex/My_Stock_v1.0/Stock_Final"
+
+data:
+  start_date: "2023-01-01"
+  end_date:
+  stock_universe: "a_share_all"
+  index_symbols: ["sh000001", "sz399001", "sz399006", "sh000300", "sh000905"]
+  report_lag_days_if_unknown: 90
+
+features:
+  sequence_length: 120
+  sequence_lengths_supported: [60, 120, 240]
+  return_windows: [1, 5, 20, 60]
+  volatility_windows: [5, 20]
+  market_windows: [1, 5, 20, 60]
+  include_fundamentals: true
+  include_market: true
+  include_sector: true
+
+label:
+  next_day_return_threshold: 0.01
+
+model:
+  hidden_size: 96
+  num_layers: 1
+  dropout: 0.15
+  learning_rate: 0.001
+  batch_size: 128
+  epochs: 12
+  device: "auto"
+  random_seed: 42
+
+train:
+  train_end: "2025-06-30"
+  validation_end: "2025-12-31"
+  top_n: 20
+
+report:
+  top_n: 20
+  min_history_days: 240

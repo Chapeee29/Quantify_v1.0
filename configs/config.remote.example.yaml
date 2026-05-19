@@ -1,0 +1,22 @@
+paths:
+  data_dir: "D:/Quantify/data"
+  model_dir: "D:/Quantify/models"
+  report_dir: "D:/Quantify/reports"
+  my_stock_std_path: "D:/codex/My_Stock_v1.0/std.xlsx"
+  my_stock_final_dir: "D:/codex/My_Stock_v1.0/Stock_Final"
+
+model:
+  device: "auto"
+  epochs: 12
+  batch_size: 128
+
+features:
+  sequence_length: 120
+
+train:
+  train_end: "2025-06-30"
+  validation_end: "2025-12-31"
+  top_n: 20
+
+report:
+  top_n: 20
