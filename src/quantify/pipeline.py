@@ -15,6 +15,16 @@ from quantify.features.dataset import (
 )
 from quantify.models.artifacts import load_preprocessor, save_preprocessor
 
+REPORT_CONTEXT_COLUMNS = [
+    "market_up_ratio",
+    "market_mean_ret_1",
+    "market_median_ret_1",
+    "market_total_amount",
+    "market_amount_ratio_5",
+    "mkt_sh000001_ret_1",
+    "mkt_sh000300_ret_1",
+]
+
 
 def load_raw_frames(config: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     store = LocalStore(config.paths.data_dir)
@@ -73,10 +83,27 @@ def prepare_prediction_arrays(config: AppConfig):
         preprocessor["sequence_scaler"],
         preprocessor["static_scaler"],
     )
-    return build_sequence_arrays(
+    arrays = build_sequence_arrays(
         scaled,
         sequence_cols,
         static_cols,
         int(preprocessor["sequence_length"]),
         require_label=False,
     )
+    return restore_report_context(arrays, frame)
+
+
+def restore_report_context(arrays, raw_feature_frame: pd.DataFrame):
+    available = [column for column in REPORT_CONTEXT_COLUMNS if column in raw_feature_frame.columns]
+    if not available or arrays.meta.empty:
+        return arrays
+    context = raw_feature_frame[["date", "code", *available]].drop_duplicates(["date", "code"])
+    report_names = {
+        "mkt_sh000001_ret_1": "sh_index_ret_1",
+        "mkt_sh000300_ret_1": "hs300_ret_1",
+    }
+    context = context.rename(columns=report_names)
+    replace_columns = [report_names.get(column, column) for column in available]
+    base = arrays.meta.drop(columns=[column for column in replace_columns if column in arrays.meta.columns])
+    arrays.meta = base.merge(context, on=["date", "code"], how="left", sort=False)
+    return arrays

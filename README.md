@@ -67,3 +67,32 @@ python -m quantify.cli --config configs\config.local.yaml extract-my-stock
 python -m quantify.cli --config configs\config.local.yaml train
 python -m quantify.cli --config configs\config.local.yaml predict
 ```
+
+## 本机每日更新
+
+真实数据首次初始化时只选择深沪主板 `00/60`，股票代码始终保存为六位字符串：
+
+```powershell
+$env:PYTHONPATH="src"
+python -m quantify.cli --config configs\config.local.yaml fetch-stock-list
+python -m quantify.cli --config configs\config.local.yaml fetch-index --workers 4
+python -m quantify.cli --config configs\config.local.yaml fetch-daily --prefixes "00,60" --workers 4
+python -m quantify.cli --config configs\config.local.yaml train
+python -m quantify.cli --config configs\config.local.yaml predict
+```
+
+初始历史数据建立后，每天执行：
+
+```powershell
+.\scripts\run_local_daily.ps1
+```
+
+当前脚本默认只维护 `00/60` 各 40 只的真实验证池，避免在第一版模型尚未改成流式训练前误把全池样本一次性装入内存。
+
+需要重新训练模型时：
+
+```powershell
+.\scripts\run_local_daily.ps1 -Retrain
+```
+
+每日增量流程会回补最近 7 个自然日并按 `code,date` 合并去重，同时加入当日股票池的上涨比例、收益中位数、横截面波动和总成交额变化等市场状态特征。

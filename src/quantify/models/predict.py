@@ -72,4 +72,45 @@ def write_top_report(candidates: pd.DataFrame, report_dir: str | Path, top_n: in
     output = report_dir / f"top_{top_n}_{as_of}.csv"
     keep = [c for c in ["date", "target_date", "code", "name", "sector", "close", "score", "next_return"] if c in top]
     top[keep].to_csv(output, index=False, encoding="utf-8-sig")
+    _write_daily_markdown(candidates, top, report_dir / f"daily_{as_of}.md")
     return output
+
+
+def _pct(value: float) -> str:
+    return "-" if pd.isna(value) else f"{value:.2%}"
+
+
+def _write_daily_markdown(candidates: pd.DataFrame, top: pd.DataFrame, output: Path) -> None:
+    row = candidates.iloc[0]
+    as_of = pd.to_datetime(row["date"]).strftime("%Y-%m-%d")
+    amount = row.get("market_total_amount", np.nan)
+    amount_text = "-" if pd.isna(amount) else f"{float(amount) / 1e8:.2f} 亿元"
+    lines = [
+        f"# 候选股日报 {as_of}",
+        "",
+        "## 当日环境",
+        "",
+        f"- 当前有效候选股票数：{len(candidates)}",
+        f"- 股票池上涨比例：{_pct(float(row.get('market_up_ratio', np.nan)))}",
+        f"- 股票池平均涨跌：{_pct(float(row.get('market_mean_ret_1', np.nan)))}",
+        f"- 股票池成交额：{amount_text}",
+        f"- 上证指数单日变化：{_pct(float(row.get('sh_index_ret_1', np.nan)))}",
+        f"- 沪深300单日变化：{_pct(float(row.get('hs300_ret_1', np.nan)))}",
+        "",
+        "## Top 候选",
+        "",
+        "| 排名 | 代码 | 名称 | 评分 |",
+        "| ---: | --- | --- | ---: |",
+    ]
+    for idx, item in top.reset_index(drop=True).iterrows():
+        lines.append(f"| {idx + 1} | {item['code']} | {item.get('name', '')} | {item['score']:.4f} |")
+    lines.extend(
+        [
+            "",
+            "## 注意",
+            "",
+            "- 当前报告是模型研究输出，不是自动交易指令。",
+            "- 若本次只抓取验证批次，市场环境统计仅反映该批次，不代表完整 00/60 股票池。",
+        ]
+    )
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")

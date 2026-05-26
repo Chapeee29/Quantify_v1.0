@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import json
 import os
 from pathlib import Path
+import time
 
 import pandas as pd
 
@@ -13,7 +14,6 @@ from quantify.data.akshare_source import AkShareSource
 from quantify.data.local_store import LocalStore
 from quantify.data.my_stock import extract_feature_dir, list_std_sheets
 from quantify.data.sample import make_sample_data
-from quantify.pipeline import prepare_prediction_arrays, prepare_training_arrays
 
 
 def _config(args: argparse.Namespace):
@@ -56,6 +56,27 @@ def _select_codes(codes: list[str], args: argparse.Namespace) -> list[str]:
     return codes
 
 
+def _try_fetch(call, retries: int):
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return call(), None
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+    return pd.DataFrame(), last_error
+
+
+def _fetch_stock_daily_process(payload):
+    code, start_date, end_date, adjust, retries, use_proxy = payload
+    if not use_proxy:
+        _disable_proxy_env()
+    source = AkShareSource(adjust=adjust)
+    frame, error = _try_fetch(lambda: source.stock_daily(code, start_date, end_date), retries)
+    return code, frame, error
+
+
 def cmd_make_sample_data(args: argparse.Namespace) -> None:
     config = _config(args)
     make_sample_data(config.paths.data_dir)
@@ -86,15 +107,20 @@ def cmd_fetch_daily(args: argparse.Namespace) -> None:
     print(f"selected daily codes: {len(codes)}, prefixes={','.join(_parse_prefixes(args.prefixes)) or 'all'}")
     frames = []
     failures = []
+    existing = store.read_csv("stocks/daily.csv", parse_dates=["date"]) if args.incremental else pd.DataFrame()
+    latest_by_code = existing.groupby("code")["date"].max().to_dict() if not existing.empty else {}
+    flushed = 0
+    successful = 0
 
-    def fetch_one(code: str):
-        try:
-            return code, source.stock_daily(code, config.data.start_date, config.data.end_date), None
-        except Exception as exc:
-            return code, pd.DataFrame(), exc
+    def payload_for(code: str):
+        start_date = config.data.start_date
+        if code in latest_by_code:
+            start_date = (latest_by_code[code] - pd.Timedelta(days=args.overlap_days)).strftime("%Y-%m-%d")
+        return (code, start_date, config.data.end_date, source.adjust, args.retries, args.use_proxy)
 
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
-        future_map = {executor.submit(fetch_one, code): code for code in codes}
+    # Sina history decoding uses MiniRacer, which is unsafe under shared-thread concurrency.
+    with ProcessPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        future_map = {executor.submit(_fetch_stock_daily_process, payload_for(code)): code for code in codes}
         for idx, future in enumerate(as_completed(future_map), start=1):
             code, frame, exc = future.result()
             if exc is not None:
@@ -102,13 +128,23 @@ def cmd_fetch_daily(args: argparse.Namespace) -> None:
                 print(f"skip {code}: {exc}")
             elif not frame.empty:
                 frames.append(frame)
+                successful += 1
+            if args.incremental and len(frames) >= args.checkpoint_every:
+                store.upsert_csv("stocks/daily.csv", pd.concat(frames, ignore_index=True), ["code", "date"], parse_dates=["date"])
+                flushed += len(frames)
+                frames.clear()
             if idx % 50 == 0 or idx == len(codes):
-                print(f"fetched daily {idx}/{len(codes)}, ok={len(frames)}, failed={len(failures)}")
-    if not frames:
+                print(f"fetched daily {idx}/{len(codes)}, ok={successful}, failed={len(failures)}")
+    if not frames and not flushed:
         raise RuntimeError("No stock daily data fetched.")
-    result = pd.concat(frames, ignore_index=True)
-    store.write_csv("stocks/daily.csv", result)
-    print(f"daily rows: {len(result)}, codes: {result['code'].nunique()}")
+    if args.incremental:
+        if frames:
+            store.upsert_csv("stocks/daily.csv", pd.concat(frames, ignore_index=True), ["code", "date"], parse_dates=["date"])
+        result = store.read_csv("stocks/daily.csv", parse_dates=["date"])
+    else:
+        result = pd.concat(frames, ignore_index=True)
+        store.write_csv("stocks/daily.csv", result)
+    print(f"daily rows: {len(result)}, codes: {result['code'].nunique()}, latest={pd.to_datetime(result['date']).max().date()}")
 
 
 def cmd_fetch_index(args: argparse.Namespace) -> None:
@@ -116,12 +152,12 @@ def cmd_fetch_index(args: argparse.Namespace) -> None:
     config = _config(args)
     source = AkShareSource()
     frames = []
+    store = LocalStore(config.paths.data_dir)
+    existing = store.read_csv("market/index_daily.csv", parse_dates=["date"]) if args.incremental else pd.DataFrame()
 
     def fetch_one(symbol: str):
-        try:
-            return symbol, source.index_daily(symbol, config.data.start_date, config.data.end_date), None
-        except Exception as exc:
-            return symbol, pd.DataFrame(), exc
+        frame, error = _try_fetch(lambda: source.index_daily(symbol, config.data.start_date, config.data.end_date), args.retries)
+        return symbol, frame, error
 
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         future_map = {executor.submit(fetch_one, symbol): symbol for symbol in config.data.index_symbols}
@@ -132,10 +168,17 @@ def cmd_fetch_index(args: argparse.Namespace) -> None:
             elif not frame.empty:
                 frames.append(frame)
     if not frames:
+        if args.incremental and not existing.empty:
+            print(f"index fetch failed; keep cached data through {existing['date'].max().date()}")
+            return
         raise RuntimeError("No index data fetched.")
     result = pd.concat(frames, ignore_index=True)
-    LocalStore(config.paths.data_dir).write_csv("market/index_daily.csv", result)
-    print(f"index rows: {len(result)}")
+    if args.incremental:
+        store.upsert_csv("market/index_daily.csv", result, ["code", "date"], parse_dates=["date"])
+        result = store.read_csv("market/index_daily.csv", parse_dates=["date"])
+    else:
+        store.write_csv("market/index_daily.csv", result)
+    print(f"index rows: {len(result)}, latest={pd.to_datetime(result['date']).max().date()}")
 
 
 def cmd_fetch_sector(args: argparse.Namespace) -> None:
@@ -248,6 +291,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         if exc.name == "torch":
             raise SystemExit("PyTorch is not installed. Install the remote training environment with `pip install -r requirements.txt`.") from exc
         raise
+    from quantify.pipeline import prepare_training_arrays
 
     config = _config(args)
     arrays = prepare_training_arrays(config)
@@ -263,6 +307,7 @@ def cmd_predict(args: argparse.Namespace) -> None:
         if exc.name == "torch":
             raise SystemExit("PyTorch is not installed. Install the remote training environment with `pip install -r requirements.txt`.") from exc
         raise
+    from quantify.pipeline import prepare_prediction_arrays
 
     config = _config(args)
     arrays = prepare_prediction_arrays(config)
@@ -296,7 +341,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=0, help="Limit stocks for a smoke fetch")
     p.add_argument("--prefixes", default="00,60", help="Comma-separated stock code prefixes, default: 00,60")
     p.add_argument("--per-prefix-limit", type=int, default=0, help="Fetch this many stocks for each requested prefix")
-    p.add_argument("--workers", type=int, default=8, help="Concurrent fetch workers")
+    p.add_argument("--workers", type=int, default=4, help="Concurrent fetch processes for MiniRacer-safe history retrieval")
+    p.add_argument("--retries", type=int, default=2, help="Retry count for failed stock requests")
+    p.add_argument("--incremental", action="store_true", help="Merge fetched rows into the existing daily data")
+    p.add_argument("--overlap-days", type=int, default=7, help="Refetch recent calendar days during incremental update")
+    p.add_argument("--checkpoint-every", type=int, default=100, help="Persist this many successful incremental fetches at a time")
     p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_daily)
 
@@ -310,6 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("fetch-index")
     p.add_argument("--workers", type=int, default=4, help="Concurrent fetch workers")
+    p.add_argument("--incremental", action="store_true", help="Merge fetched rows into the existing index data")
+    p.add_argument("--retries", type=int, default=2, help="Retry count for failed index requests")
     p.add_argument("--use-proxy", action="store_true", help="Use current HTTP(S)_PROXY environment variables")
     p.set_defaults(func=cmd_fetch_index)
 

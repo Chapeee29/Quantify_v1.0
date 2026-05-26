@@ -37,6 +37,24 @@ class LocalStore:
         frame.to_csv(path, index=False, encoding="utf-8-sig")
         return path
 
+    def upsert_csv(
+        self,
+        name: str,
+        frame: pd.DataFrame,
+        key_columns: list[str],
+        parse_dates: list[str] | None = None,
+    ) -> Path:
+        existing = self.read_csv(name, parse_dates=parse_dates)
+        incoming = frame.copy()
+        if "code" in incoming.columns:
+            incoming["code"] = incoming["code"].astype(str).str.zfill(6)
+        for column in parse_dates or []:
+            if column in incoming.columns:
+                incoming[column] = pd.to_datetime(incoming[column])
+        combined = pd.concat([existing, incoming], ignore_index=True) if not existing.empty else incoming
+        combined = combined.drop_duplicates(subset=key_columns, keep="last").sort_values(key_columns)
+        return self.write_csv(name, combined)
+
     def required(self, name: str, parse_dates: list[str] | None = None) -> pd.DataFrame:
         frame = self.read_csv(name, parse_dates=parse_dates)
         if frame.empty:

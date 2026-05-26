@@ -35,6 +35,24 @@ def add_next_day_label(frame: pd.DataFrame, threshold: float) -> pd.DataFrame:
     return frame
 
 
+def add_universe_context(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add same-day cross-sectional context without using future observations."""
+    result = frame.copy()
+    breadth = (
+        result.groupby("date", as_index=False)
+        .agg(
+            market_up_ratio=("ret_1", lambda s: float((s > 0).mean())),
+            market_mean_ret_1=("ret_1", "mean"),
+            market_median_ret_1=("ret_1", "median"),
+            market_cross_section_vol=("ret_1", "std"),
+            market_total_amount=("amount", "sum"),
+        )
+        .sort_values("date")
+    )
+    breadth["market_amount_ratio_5"] = breadth["market_total_amount"] / breadth["market_total_amount"].rolling(5, min_periods=1).mean() - 1
+    return result.merge(breadth, on="date", how="left")
+
+
 def _pivot_fundamentals(fundamentals: pd.DataFrame) -> pd.DataFrame:
     if fundamentals is None or fundamentals.empty:
         return pd.DataFrame()
@@ -75,6 +93,7 @@ def build_feature_frame(
     frame = stock_daily.copy()
     frame["date"] = pd.to_datetime(frame["date"])
     frame = add_technical_features(frame)
+    frame = add_universe_context(frame)
     frame = add_next_day_label(frame, config.label.next_day_return_threshold)
 
     if config.features.include_market and index_daily is not None and not index_daily.empty:
@@ -154,6 +173,13 @@ def build_sequence_arrays(
                     "sector": g.loc[end_idx, "sector"] if "sector" in g else "",
                     "close": g.loc[end_idx, "close"],
                     "next_return": g.loc[end_idx, "next_return"],
+                    "market_up_ratio": g.loc[end_idx, "market_up_ratio"] if "market_up_ratio" in g else np.nan,
+                    "market_mean_ret_1": g.loc[end_idx, "market_mean_ret_1"] if "market_mean_ret_1" in g else np.nan,
+                    "market_median_ret_1": g.loc[end_idx, "market_median_ret_1"] if "market_median_ret_1" in g else np.nan,
+                    "market_total_amount": g.loc[end_idx, "market_total_amount"] if "market_total_amount" in g else np.nan,
+                    "market_amount_ratio_5": g.loc[end_idx, "market_amount_ratio_5"] if "market_amount_ratio_5" in g else np.nan,
+                    "sh_index_ret_1": g.loc[end_idx, "mkt_sh000001_ret_1"] if "mkt_sh000001_ret_1" in g else np.nan,
+                    "hs300_ret_1": g.loc[end_idx, "mkt_sh000300_ret_1"] if "mkt_sh000300_ret_1" in g else np.nan,
                 }
             )
 
